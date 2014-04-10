@@ -1,34 +1,35 @@
 /*
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
- * 
- * 
+ *
+ *
+ *
  * simple udp-lirc daemon for yaUsbIr
- * 
+ *
  * Compile:
  * 	gcc -o yausbir_lirc main.cpp -lusb
- * 
+ *
  * start lircd:
  *  lircd --driver=udp [config-file]
  *  yausbir_lirc [-f]
- * 
- * 
+ *
+ *
  */
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <asm/types.h>
@@ -48,15 +49,15 @@
 
 #define LIRCD_UDP_PORT 8765
 
-#define CMD_NONE               0x00 // Kommando = 0 -> Keine Kommando, nur Dummydaten
-#define CMD_IRDATA             0x01 // Kommando = 1 -> IR-Daten senden/ empfangen
-#define CMD_COMDATA            0x02 // Kommando = 2 -> serielle Daten vom CommPort senden/ empfangen
-#define CMD_SETCOMBAUD         0x03 // Kommando = 3 -> Baudrate CommPort setzen
-#define CMD_GETCOMBAUD         0x04 // Kommando = 4 -> Baudrate CommPort abfragen
-#define CMD_GETIOS             0x05 // Kommando = 5 -> alle Input/Output Port lesen
-#define CMD_GETIO              0x06 // Kommando = 6 -> einen Input/Output Port lesen
-#define CMD_SETIOS             0x07 // Kommando = 7 -> alle Outputports setzen/lÃ¶schen
-#define CMD_SETIO              0x08 // Kommando = 8 -> einen Outputport setzen/lÃ¶schen
+#define CMD_NONE       0x00 // Kommando = 0 -> Keine Kommando, nur Dummydaten
+#define CMD_IRDATA     0x01 // Kommando = 1 -> IR-Daten senden/ empfangen
+#define CMD_COMDATA    0x02 // Kommando = 2 -> serielle Daten senden/ empfangen
+#define CMD_SETCOMBAUD 0x03 // Kommando = 3 -> Baudrate CommPort setzen
+#define CMD_GETCOMBAUD 0x04 // Kommando = 4 -> Baudrate CommPort abfragen
+#define CMD_GETIOS     0x05 // Kommando = 5 -> alle Input/Output Port lesen
+#define CMD_GETIO      0x06 // Kommando = 6 -> einen Input/Output Port lesen
+#define CMD_SETIOS     0x07 // Kommando = 7 -> alle Outputports setzen/löschen
+#define CMD_SETIO      0x08 // Kommando = 8 -> einen Outputport setzen/löschen
 
 #define IRRX_NODATA 0x0000
 
@@ -64,16 +65,11 @@ extern char *optarg;
 extern int optind, opterr, optopt;
 char *prog;
 int daemonized;
+int debug = 0;
 
-// debugging can either replace, or augment, normal operation
-#define DEBUG_HEX 1
-#define DEBUG_PULSE 1
-int debug;
+void logprintf(int prio, const char *format_str, ...);
 
-void report(char *s);
-void error(char *s);
-
-//*** raw hid interface **************************************************************************
+//*** raw hid interface ******************************************************
 
 typedef struct {
     usb_dev_handle *usb;
@@ -81,6 +77,11 @@ typedef struct {
     int ep_in;
     int ep_out;
 } raw_hid;
+
+//****************************************************************************
+
+static int usb_vendor = 0x10c4;
+static int usb_product = 0x876c;
 
 //  rawhidrecv - receive a packet
 //    Inputs:
@@ -98,7 +99,7 @@ int rawhidrecv(raw_hid *hid, void *buf, int len, int timeout)
     r = usb_interrupt_read(hid->usb, hid->ep_in, (char*)buf, len, timeout);
     if (r >= 0) return r;
     if (r == -110) return 0;// timeout
-    //printf("Interrupt read (%d: %m) (%s).\n", r, usb_strerror());
+    //logprintf(LOG_NOTICE,"yaUsbIr: Interrupt read (%d: %m) (%s).\n", r, usb_strerror());
     return -1;
 }
 
@@ -141,7 +142,6 @@ raw_hid *rawhidopen(int vid, int pid, int info)
     int ifacenum, n, len, ep_in, ep_out;
     raw_hid *hid;
     char text[512];
-    char text2[100];
 
     usb_init();
     usb_find_busses();
@@ -152,17 +152,16 @@ raw_hid *rawhidopen(int vid, int pid, int info)
             if (dev->descriptor.idProduct != pid) continue;
             if (!dev->config) continue;
             if (dev->config->bNumInterfaces < 1) continue;
-            if (info) {
-                sprintf(text,"device: vid=%04X, pic=%04X, with %d interface",
+            if (info)
+                logprintf(LOG_NOTICE,"yaUsbIr: device: vid=%04X, pic=%04X, with %d interface",
                     dev->descriptor.idVendor,dev->descriptor.idProduct,dev->config->bNumInterfaces);
-                report(text);
-            }
+
             iface = dev->config->interface;
             usb = NULL;
             for (ifacenum=0; ifacenum<dev->config->bNumInterfaces && iface; ifacenum++, iface++) {
                 desc = iface->altsetting;
                 if (!desc) continue;
-                //printf("  type %d, %d, %d\n", desc->bInterfaceClass, desc->bInterfaceSubClass, desc->bInterfaceProtocol);
+                //logprintf(LOG_NOTICE,"yaUsbIr:   type %d, %d, %d\n", desc->bInterfaceClass, desc->bInterfaceSubClass, desc->bInterfaceProtocol);
                 if (desc->bInterfaceClass != 3) continue;
                 if (desc->bInterfaceSubClass != 0) continue;
                 if (desc->bInterfaceProtocol != 0) continue;
@@ -171,44 +170,41 @@ raw_hid *rawhidopen(int vid, int pid, int info)
                 for (n = 0; n < desc->bNumEndpoints; n++, ep++) {
                     if (ep->bEndpointAddress & 0x80) {
                         if (!ep_in) ep_in = ep->bEndpointAddress & 0x7F;
-                        //printf("    IN endpoint %d\n", ep_in);
+                        //logprintf(LOG_NOTICE,"yaUsbIr:     IN endpoint %d\n", ep_in);
                     } else {
                         if (!ep_out) ep_out = ep->bEndpointAddress;
-                        //printf("    OUT endpoint %d\n", ep_out);
+                        //logprintf(LOG_NOTICE,"yaUsbIr:     OUT endpoint %d\n", ep_out);
                     }
                 }
                 if (!ep_in) continue;
                 if (!usb) {
                     usb = usb_open(dev);
                     if (!usb) {
-                        report("unable to open device");
+                        logprintf(LOG_ERR,"yaUsbIr: unable to open device");
                         break;
                     }
                 }
-                
+
                 usb_get_string_simple(usb, 1,(char *)buf, sizeof(buf));
-                usb_get_string_simple(usb, 2,text2, sizeof(text2));
-                if (info) {
-                    sprintf(text,"Manufacturer: %s\nProduct: %s\nhid interface (generic)", buf,text2);
-                    report(text);
-                }
-                
+                usb_get_string_simple(usb, 2,text, sizeof(text));
+                if (info)
+                    logprintf(LOG_NOTICE,"         Manufacturer: %s\n                Product: %s\n                hid interface (generic)", buf,text);
+
                 if (usb_get_driver_np(usb, ifacenum, (char *)buf, sizeof(buf)) >= 0) {
-                    if (info) {
-                        sprintf(text,"in use by driver \"%s\"", buf);
-                        report(text);
-                    }
+                    if (info)
+                        logprintf(LOG_NOTICE,"yaUsbIr: in use by driver \"%s\"", buf);
+
                     if (usb_detach_kernel_driver_np(usb, ifacenum) < 0) {
-                        error("unable to detach from kernel");
+                        logprintf(LOG_ERR,"yaUsbIr: unable to detach from kernel");
                         continue;
                     }
                 }
                 if (usb_claim_interface(usb, ifacenum) < 0) {
-                    printf("unable claim interface %d", ifacenum);
+                    logprintf(LOG_ERR,"yaUsbIr: unable claim interface %d", ifacenum);
                     continue;
                 }
                 len = usb_control_msg(usb, 0x81, 6, 0x2200, ifacenum, (char *)buf, sizeof(buf), 250);
-                //printf("descriptor, len=%d\n", len);
+                //logprintf(LOG_NOTICE,"descriptor, len=%d\n", len);
                 if (len < 2) {
                     usb_release_interface(usb, ifacenum);
                     continue;
@@ -246,7 +242,7 @@ void rawhidclose(raw_hid **hid)
     *hid = NULL;
 }
 
-//************************************************************************************************
+//*****************************************************************************
 
 void usage(void)
 {
@@ -256,31 +252,26 @@ void usage(void)
         "   lircd_port defaults to 8765.\n"
         "   options:\n"
         "   -t      to make a TCP connection rather than UDP\n"
-        "   -d      for debugging (without socket connection)\n"
         "   -D      display pulse/pause time for debugging\n"
-        "   -f      to keep program in foreground\n"        
+        "   -f      to keep program in foreground\n"
         "   -w S    to poll the creation of hiddev at S second intervals (default 3 sec)\n"
         , prog);
     exit(1);
 }
 
-void report(char *s)
+void logprintf(int prio, const char *format_str, ...)
 {
-    if (daemonized)
-        syslog(LOG_NOTICE, s);
-    else
-        fprintf(stderr, "%s\n", s);
-}
+    va_list ap;
+    va_start(ap, format_str);
 
-void error(char *s)
-{
-    if (daemonized) {
-        syslog(LOG_ERR, "%s: %m", s);
-        syslog(LOG_ERR, "exiting");
-    } else {
-        perror(s);
+    if (daemonized)
+        vsyslog(prio, format_str, ap);
+    else {
+        vfprintf(stderr, format_str, ap);
+        fprintf(stderr, "\n");
     }
-    exit(1);
+
+    va_end(ap);
 }
 
 int socket_init(int tcp, char *host, int port)
@@ -288,7 +279,7 @@ int socket_init(int tcp, char *host, int port)
     struct hostent *hent;
     int s;
     sockaddr_in si_other[1];
-    
+
     hent = gethostbyname(host);
     if (!hent) {
         fprintf(stderr, "%s: gethostbyname: ", prog);
@@ -297,11 +288,15 @@ int socket_init(int tcp, char *host, int port)
     }
 
     if (tcp) {
-        if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-            error("socket");
+        if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+            logprintf(LOG_ERR, "socket");
+            exit(1);
+        }
     } else {
-        if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
-            error("socket");
+        if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+            logprintf(LOG_ERR, "socket");
+            exit(1);
+        }
     }
 
     memset((char *) si_other, 0 ,sizeof(struct sockaddr_in));
@@ -323,77 +318,68 @@ void hiddev_restore(void)
 void sighandler(int sig)
 {
     hiddev_restore();
-    error("signal");
+    exit(1);
+    logprintf(LOG_ERR, "signal");
 }
 
 void data_loop(raw_hid *dev, int tcp, char *host, int port)
 {
-    uint8_t buf[64];
+    uint8_t ya_usbir_rxbuf[64];
     uint8_t bufUdp[64];
     int bufUdpLen;
-    int num , i;
+    int num, n;
     static int to = -1;
-    int64_t irsig;
+    int64_t rcvdata = 0;
     char text[256];
-    
+
     while (dev!=NULL) {
-        num = rawhidrecv(dev, buf, sizeof(buf), 220);
+        num = rawhidrecv(dev, ya_usbir_rxbuf, sizeof(ya_usbir_rxbuf), 220);
         if (num < 0) {
-            report("error reading, device went offline");
+            logprintf(LOG_ERR,"yaUsbIr: error reading, device went offline");
             break;
         }
-        if (num > 0) {
-            if ((debug==0)||(debug==DEBUG_PULSE)) {// sending to hostent
-                if (buf[0]==CMD_IRDATA) {
-                    if (to < 0)
-                        to = socket_init(tcp, host, port);
-                    if (to >= 0) {
-                        // lirc-udp daemon received UDP packets consist of some number of LE 16-bit integers.
-                        // The high bit signifies whether the received signal was high or low;
-                        // the low 15 bits specify the number of 1/16384-second intervals the signal lasted.
 
-                        bufUdpLen = 0;
-                        for (i=2; i<num; i++) {
-                            irsig = ((int)buf[i++]&0x7F)<<8;// MSB
-                            irsig |= buf[i];// LSB
-                            if (irsig==IRRX_NODATA) break;// end of data
-                            irsig *= buf[1];// us step
-                            
-                            if (debug==DEBUG_PULSE)
-                                sprintf(text,"%s %ldus",buf[i-1] & 0x80?"pulse":"space",(long)irsig);
-                            
-                            // Convert microseconds to 1/16384-seconds
-                            irsig *=  1000L;
-                            irsig /= 61035L;
+        if ((num > 2) && (ya_usbir_rxbuf[0] == CMD_IRDATA)) {
+            if (to < 0)
+                to = socket_init(tcp, host, port);
+            if (to >= 0) {
+                // lirc-udp daemon received UDP packets consist of some number
+                // of LE 16-bit integers. The high bit signifies whether the
+                // received signal was high or low; the low 15 bits specify the
+                // number of 1/16384-second intervals the signal lasted.
+                bufUdpLen = 0;
+                for (n=2; n < sizeof(ya_usbir_rxbuf) ;n += 2) {
+                    rcvdata = ((int)ya_usbir_rxbuf[n]&0x7F)<<8;// MSB
+                    rcvdata |= ya_usbir_rxbuf[n+1];// LSB
+                    rcvdata *= ya_usbir_rxbuf[1];// us step
+                    if (rcvdata==IRRX_NODATA) break;// end of data
 
-                            if (debug==DEBUG_PULSE) {
-                                sprintf(text+strlen(text)," (upd %ld)",(long)irsig);
-                                report(text);
-                            }
-                           
-                            if (irsig > 0x7FFF) irsig = 0x7FFF;
-                            if ((buf[i-1] & 0x80)==0) irsig |= 0x8000;// PULSE_BIT (invers!)
-                            bufUdp[bufUdpLen++] = irsig & 0xFF;// LSB
-                            bufUdp[bufUdpLen++] = (irsig & 0xFF00)>>8;// MSB
-                        }
+                    if (debug)
+                        sprintf(text,"%s %ldus",ya_usbir_rxbuf[n] & 0x80?"pulse":"space",(long)rcvdata);
 
-                        if (bufUdpLen>0) {
-                            if (write(to,bufUdp,bufUdpLen) < 0) {
-                                if (errno != ECONNREFUSED)
-                                    error("write");
-                            }
+                    // Convert microseconds to 1/16384-seconds
+                    rcvdata *=  1000L;
+                    rcvdata /= 61035L;
+
+                    if (debug)
+                        logprintf(LOG_DEBUG, "%s (upd %ld)",text,(long)rcvdata);
+
+                    if (rcvdata > 0x7FFF) rcvdata = 0x7FFF;
+                    if ((ya_usbir_rxbuf[n] & 0x80)==0)
+                        rcvdata |= 0x8000;// PULSE_BIT (invers!)
+
+                    bufUdp[bufUdpLen++] = rcvdata & 0xFF;// LSB
+                    bufUdp[bufUdpLen++] = (rcvdata & 0xFF00)>>8;// MSB
+                }
+
+                if (bufUdpLen>0) {
+                    if (write(to,bufUdp,bufUdpLen) < 0) {
+                        if (errno != ECONNREFUSED) {
+                            logprintf(LOG_ERR, "write");
+                            exit(1);
                         }
                     }
                 }
-            } else {
-                sprintf(text,"recv %d bytes:", num);
-                report(text);
-                memset(text,' ',sizeof(text));
-                text[sizeof(text)-1] = 0;
-                for (int i=0; i<num; i++) 
-                    sprintf(text+(i*3),"%02X ", buf[i]);
-                text[3*32-1] = '\n';
-                report(text);
             }
         }
     }
@@ -411,20 +397,16 @@ int main(int argc, char *argv[])
     int logged = 0;
     int first = 1;
 
-    host = "127.0.0.1\0";
-    debug = 0;
-    
+    host = (char *)"127.0.0.1\0";
+
     prog = argv[0];
     p = strrchr(argv[0], '/');
     if (p) prog = p + 1;
 
-    while ((c = getopt(argc, argv, "dDtfw:h:p:")) != EOF) {
+    while ((c = getopt(argc, argv, "Dtfw:h:p:")) != EOF) {
         switch (c) {
-        case 'd':
-            debug = DEBUG_HEX;
-            break;
         case 'D':
-            debug = DEBUG_PULSE;
+            debug = 1;
             break;
         case 't':
             tcp = 1;
@@ -440,7 +422,7 @@ int main(int argc, char *argv[])
         case 'h':
             host = optarg;
             break;
-        case 'p': 
+        case 'p':
             port = atoi(optarg);
             break;
         default:
@@ -455,10 +437,10 @@ int main(int argc, char *argv[])
 
     while(1) {
         raw_hid *dev = rawhidopen(0x10c4, 0x876c, first);
-        
+
         if ((wait_term==0)&&(dev==NULL)) {
-            error("can't open yaUsbIr device 0x10c4:0x876c");
-            break;
+            logprintf(LOG_ERR, "can't open yaUsbIr device 0x10c4:0x876c");
+            exit(1);
         }
 
         if ((first)&&(dev!=NULL)) {
@@ -469,28 +451,32 @@ int main(int argc, char *argv[])
         }
 
         if (!daemonized && !foreground && !debug) {
-            if (daemon(0, 0) < 0)
-                error("daemon");
+            if (daemon(0, 0) < 0) {
+                logprintf(LOG_ERR, "daemon");
+                exit(1);
+            }
             daemonized = 1;
         }
 
         if (dev!=NULL)
-            report("connect to yaUsbIr");
-        
+            logprintf(LOG_NOTICE, "connect to yaUsbIr");
+
         data_loop(dev, tcp, host, port);
         rawhidclose(&dev);
 
         // we'll only ever return from data_loop() if our read()
         // returns 0, which usually means our HID-based IR-Transceiver has
         // gone away.  loop if we were told to wait (-w) for it.
-        if (!wait_term)
-            error("end-of-dataloop");
-       
+        if (!wait_term) {
+            logprintf(LOG_ERR, "end-of-dataloop");
+            exit(1);
+        }
+
         if (!logged) {
-            report("waiting for hiddev creation");
+            logprintf(LOG_NOTICE, "waiting for hiddev creation");
             logged = 1;
         }
-        
+
         sleep(wait_term);
     }
 
