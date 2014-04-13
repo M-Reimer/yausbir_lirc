@@ -18,7 +18,7 @@
  * simple udp-lirc daemon for yaUsbIr
  *
  * Compile:
- * 	gcc -o yausbir_lirc main.cpp -lusb
+ * 	g++ -o yausbir_lirc main.cpp -lusb-1.0
  *
  * start lircd:
  *  lircd --driver=udp [config-file]
@@ -45,7 +45,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
-#include <usb.h>
+#include "libusb-1.0/libusb.h"
 
 #define LIRCD_UDP_PORT 8765
 
@@ -72,10 +72,12 @@ void logprintf(int prio, const char *format_str, ...);
 //*** raw hid interface ******************************************************
 
 typedef struct {
-    usb_dev_handle *usb;
+    libusb_device_handle *handle;
+    int kernelattached;
     int iface;
-    int ep_in;
-    int ep_out;
+    int nb_ifaces;
+    uint8_t ep_in;
+    uint8_t ep_out;
 } raw_hid;
 
 //****************************************************************************
@@ -95,11 +97,13 @@ static int usb_product = 0x876c;
 int rawhidrecv(raw_hid *hid, void *buf, int len, int timeout)
 {
     int r;
-    if (hid==NULL) return -1;
-    r = usb_interrupt_read(hid->usb, hid->ep_in, (char*)buf, len, timeout);
-    if (r >= 0) return r;
-    if (r == -110) return 0;// timeout
-    //logprintf(LOG_NOTICE,"yaUsbIr: Interrupt read (%d: %m) (%s).\n", r, usb_strerror());
+    int lenret;
+    if ((hid == NULL) || (hid->handle == NULL)) return -1;
+
+    r = libusb_interrupt_transfer(hid->handle, hid->ep_in, (unsigned char*)buf, len, &lenret, timeout);
+    if (r >= 0) return lenret;
+    if ((r == LIBUSB_ERROR_TIMEOUT) || (r == -110)) return 0;// timeout
+    logprintf(LOG_ERR,"yaUsbIr: interrupt read error %d, %s", r, libusb_error_name(r));
     return -1;
 }
 
@@ -114,116 +118,17 @@ int rawhidrecv(raw_hid *hid, void *buf, int len, int timeout)
 //
 int rawhidsend(raw_hid *hid, void *buf, int len, int timeout)
 {
-    if (hid==NULL) return -1;
-    if (hid->ep_out) {
-        return usb_interrupt_write(hid->usb, hid->ep_out, (char*)buf, len, timeout);
-    } else {
-        return usb_control_msg(hid->usb, 0x21, 9, 0, hid->iface, (char*)buf, len, timeout);
+    int r;
+    int lenret;
+    if ((hid == NULL) || (hid->handle == NULL)) return -1;
+
+    r = libusb_interrupt_transfer(hid->handle, hid->ep_out, (unsigned char*)buf, len, &lenret, timeout);
+    if (r < 0) {
+        logprintf(LOG_ERR,"yaUsbIr: interrupt write error %d, %s", r, libusb_error_name(r));
+        return -1;
     }
-}
 
-//  rawhidOpen - open first device
-//
-//    Inputs:
-//  vid = Vendor ID
-//  pid = Product ID
-//    Output:
-//  first openend device
-//
-raw_hid *rawhidopen(int vid, int pid, int info)
-{
-    struct usb_bus *bus;
-    struct usb_device *dev;
-    struct usb_interface *iface;
-    struct usb_interface_descriptor *desc;
-    struct usb_endpoint_descriptor *ep;
-    usb_dev_handle *usb;
-    uint8_t buf[1024];
-    int ifacenum, n, len, ep_in, ep_out;
-    raw_hid *hid;
-    char text[512];
-
-    usb_init();
-    usb_find_busses();
-    usb_find_devices();
-    for (bus = usb_get_busses(); bus; bus = bus->next) {
-        for (dev = bus->devices; dev; dev = dev->next) {
-            if (dev->descriptor.idVendor != vid) continue;
-            if (dev->descriptor.idProduct != pid) continue;
-            if (!dev->config) continue;
-            if (dev->config->bNumInterfaces < 1) continue;
-            if (info)
-                logprintf(LOG_NOTICE,"yaUsbIr: device: vid=%04X, pic=%04X, with %d interface",
-                    dev->descriptor.idVendor,dev->descriptor.idProduct,dev->config->bNumInterfaces);
-
-            iface = dev->config->interface;
-            usb = NULL;
-            for (ifacenum=0; ifacenum<dev->config->bNumInterfaces && iface; ifacenum++, iface++) {
-                desc = iface->altsetting;
-                if (!desc) continue;
-                //logprintf(LOG_NOTICE,"yaUsbIr:   type %d, %d, %d\n", desc->bInterfaceClass, desc->bInterfaceSubClass, desc->bInterfaceProtocol);
-                if (desc->bInterfaceClass != 3) continue;
-                if (desc->bInterfaceSubClass != 0) continue;
-                if (desc->bInterfaceProtocol != 0) continue;
-                ep = desc->endpoint;
-                ep_in = ep_out = 0;
-                for (n = 0; n < desc->bNumEndpoints; n++, ep++) {
-                    if (ep->bEndpointAddress & 0x80) {
-                        if (!ep_in) ep_in = ep->bEndpointAddress & 0x7F;
-                        //logprintf(LOG_NOTICE,"yaUsbIr:     IN endpoint %d\n", ep_in);
-                    } else {
-                        if (!ep_out) ep_out = ep->bEndpointAddress;
-                        //logprintf(LOG_NOTICE,"yaUsbIr:     OUT endpoint %d\n", ep_out);
-                    }
-                }
-                if (!ep_in) continue;
-                if (!usb) {
-                    usb = usb_open(dev);
-                    if (!usb) {
-                        logprintf(LOG_ERR,"yaUsbIr: unable to open device");
-                        break;
-                    }
-                }
-
-                usb_get_string_simple(usb, 1,(char *)buf, sizeof(buf));
-                usb_get_string_simple(usb, 2,text, sizeof(text));
-                if (info)
-                    logprintf(LOG_NOTICE,"         Manufacturer: %s\n                Product: %s\n                hid interface (generic)", buf,text);
-
-                if (usb_get_driver_np(usb, ifacenum, (char *)buf, sizeof(buf)) >= 0) {
-                    if (info)
-                        logprintf(LOG_NOTICE,"yaUsbIr: in use by driver \"%s\"", buf);
-
-                    if (usb_detach_kernel_driver_np(usb, ifacenum) < 0) {
-                        logprintf(LOG_ERR,"yaUsbIr: unable to detach from kernel");
-                        continue;
-                    }
-                }
-                if (usb_claim_interface(usb, ifacenum) < 0) {
-                    logprintf(LOG_ERR,"yaUsbIr: unable claim interface %d", ifacenum);
-                    continue;
-                }
-                len = usb_control_msg(usb, 0x81, 6, 0x2200, ifacenum, (char *)buf, sizeof(buf), 250);
-                //logprintf(LOG_NOTICE,"descriptor, len=%d\n", len);
-                if (len < 2) {
-                    usb_release_interface(usb, ifacenum);
-                    continue;
-                }
-                hid = (raw_hid *)malloc(sizeof(raw_hid));
-                if (!hid) {
-                    usb_release_interface(usb, ifacenum);
-                    continue;
-                }
-                hid->usb = usb;
-                hid->iface = ifacenum;
-                hid->ep_in = ep_in;
-                hid->ep_out = ep_out;
-                return hid;
-            }
-            if (usb) usb_close(usb);
-        }
-    }
-    return NULL;
+    return lenret;
 }
 
 //  rawhidClose - close a device
@@ -233,13 +138,126 @@ raw_hid *rawhidopen(int vid, int pid, int info)
 //    Output
 //  (nothing)
 //
-void rawhidclose(raw_hid **hid)
+void rawhidclose(raw_hid *hid)
 {
-    if ((hid==NULL)||(*hid==NULL)) return;
-    usb_release_interface((*hid)->usb, (*hid)->iface);
-    usb_close((*hid)->usb);
-    free(*hid);
-    *hid = NULL;
+    int iface;
+
+//    logprintf(LOG_NOTICE,"yaUsbIr: close device A, %d, %d",hid,hid->handle);
+
+    if ((hid == NULL) || (hid->handle == NULL)) return;
+
+    logprintf(LOG_NOTICE,"yaUsbIr: close device");
+
+    for (iface = 0; iface<hid->nb_ifaces; iface++)
+        libusb_release_interface(hid->handle, iface);
+
+    //if we detached kernel driver, reattach.
+    if (hid->kernelattached == 1)
+        libusb_attach_kernel_driver( hid->handle, hid->iface);
+
+    libusb_close(hid->handle);
+    hid->handle = NULL;
+
+    libusb_exit(NULL);
+}
+
+//  rawhidOpen - open first device
+//
+//    Inputs:
+//  hid = device struct
+//  vid = Vendor ID
+//  pid = Product ID
+//    Output:
+//  first openend device
+//
+raw_hid *rawhidopen(raw_hid *hid, int vid, int pid, int info)
+{
+    libusb_device *dev;
+    int r;
+    char stringManufacturer[128] = {0};
+    char stringProduct[128] = {0};
+    int iface;
+    struct libusb_device_descriptor dev_desc;
+    struct libusb_config_descriptor *conf_desc;
+
+    if (hid == NULL) return NULL;
+
+    rawhidclose(hid);
+
+    logprintf(LOG_INFO, "yaUsbIr: Initializing yaUsbIr (libusb-1.0 API)");
+    if (libusb_init(NULL) < 0) {
+        logprintf(LOG_ERR, "yaUsbIr: unable to init libusb");
+        return 0;
+    }
+
+#ifdef LIBUSBX_API_VERSION
+    logprintf(LOG_NOTICE, "yaUsbIr: libusb version %d.%d.%d.%d %s %s", libusb_get_version()->major, libusb_get_version()->minor,
+        libusb_get_version()->micro, libusb_get_version()->nano, libusb_get_version()->rc, libusb_get_version()->describe);
+#endif
+
+    hid->handle = libusb_open_device_with_vid_pid(NULL, vid, pid);
+
+    if (hid->handle == NULL) {
+        logprintf(LOG_ERR,"yaUsbIr: unable to open device");
+        return NULL;
+    }
+
+    dev = libusb_get_device(hid->handle);
+
+    r = libusb_get_device_descriptor(dev, &dev_desc);
+    if (r < 0) {
+        logprintf(LOG_ERR,"yaUsbIr: failed to get device descriptor");
+        rawhidclose(hid);
+        return NULL;
+    }
+
+    r = libusb_get_config_descriptor(dev, 0, &conf_desc);
+    if (r < 0) {
+        logprintf(LOG_ERR,"yaUsbIr: failed to get config descriptor");
+        rawhidclose(hid);
+        return NULL;
+    }
+
+    hid->kernelattached = 0;
+    hid->iface = 0;
+    hid->ep_in = 0x81;
+    hid->ep_out = 0x01;
+    hid->nb_ifaces = conf_desc->bNumInterfaces;
+    libusb_free_config_descriptor(conf_desc);
+
+    if (libusb_kernel_driver_active(hid->handle, hid->iface) == 1) {
+        logprintf(LOG_NOTICE,"yaUsbIr: device busy...detaching from kernel...");
+        r = libusb_detach_kernel_driver(hid->handle, hid->iface);
+        if (r < LIBUSB_SUCCESS) {
+            logprintf(LOG_ERR,"yaUsbIr: unable to detach from kernel, error %d, %s",r , libusb_error_name(r));
+            return NULL;
+        }
+        hid->kernelattached = 1;
+    }
+
+    for (iface = 0; iface < hid->nb_ifaces; iface++) {
+        r = libusb_claim_interface(hid->handle, iface);
+        if (r < LIBUSB_SUCCESS) {
+            logprintf(LOG_ERR,"yaUsbIr: unable claim interface %d, error %d, %s", iface, r, libusb_error_name(r));
+            rawhidclose(hid);
+            return NULL;
+        }
+    }
+
+    if (info) {
+        if (dev_desc.iManufacturer != 0)
+            libusb_get_string_descriptor_ascii(hid->handle, dev_desc.iManufacturer, (unsigned char*)stringManufacturer, sizeof(stringManufacturer)-1);
+        if (dev_desc.iProduct != 0)
+            libusb_get_string_descriptor_ascii(hid->handle, dev_desc.iProduct, (unsigned char*)stringProduct, sizeof(stringProduct)-1);
+        logprintf(LOG_NOTICE,  "yaUsbIr: idVendor=%04X, idProduct=%04X\n"
+                "                Manufacturer: %s\n"
+                "                Product: %s\n"
+                "                hid interface (generic)\n"
+                "                SerialNumber: %04d",
+            dev_desc.idVendor, dev_desc.idProduct, stringManufacturer, stringProduct, dev_desc.iSerialNumber);
+    }
+
+    return hid;
 }
 
 //*****************************************************************************
@@ -332,8 +350,8 @@ void data_loop(raw_hid *dev, int tcp, char *host, int port)
     int64_t rcvdata = 0;
     char text[256];
 
-    while (dev!=NULL) {
-        num = rawhidrecv(dev, ya_usbir_rxbuf, sizeof(ya_usbir_rxbuf), 220);
+    while (dev->handle!=NULL) {
+        num = rawhidrecv(dev, ya_usbir_rxbuf, sizeof(ya_usbir_rxbuf), 25);
         if (num < 0) {
             logprintf(LOG_ERR,"yaUsbIr: error reading, device went offline");
             break;
@@ -396,6 +414,7 @@ int main(int argc, char *argv[])
     int tcp = 0;
     int logged = 0;
     int first = 1;
+    raw_hid dev = {NULL, 0, 0, 0, 0, 0};
 
     host = (char *)"127.0.0.1\0";
 
@@ -436,14 +455,14 @@ int main(int argc, char *argv[])
     }
 
     while(1) {
-        raw_hid *dev = rawhidopen(0x10c4, 0x876c, first);
+        rawhidopen(&dev, usb_vendor, usb_product, first);
 
-        if ((wait_term==0)&&(dev==NULL)) {
-            logprintf(LOG_ERR, "can't open yaUsbIr device 0x10c4:0x876c");
+        if ((wait_term==0)&&(dev.handle==NULL)) {
+          logprintf(LOG_ERR, "can't open yaUsbIr device %04X:%04X", usb_vendor, usb_product);
             exit(1);
         }
 
-        if ((first)&&(dev!=NULL)) {
+        if ((first)&&(dev.handle!=NULL)) {
             first = 0;
             atexit(hiddev_restore);
             signal(SIGTERM, sighandler);
@@ -458,10 +477,10 @@ int main(int argc, char *argv[])
             daemonized = 1;
         }
 
-        if (dev!=NULL)
+        if (dev.handle!=NULL)
             logprintf(LOG_NOTICE, "connect to yaUsbIr");
 
-        data_loop(dev, tcp, host, port);
+        data_loop(&dev, tcp, host, port);
         rawhidclose(&dev);
 
         // we'll only ever return from data_loop() if our read()
