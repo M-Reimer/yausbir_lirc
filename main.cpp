@@ -336,7 +336,8 @@ void data_loop(raw_hid *dev, int tcp, char *host, int port)
     uint8_t ya_usbir_rxbuf[64];
     uint8_t bufUdp[64];
     int bufUdpLen;
-    int num, n;
+    int num;
+    unsigned int n;
     static int to = -1;
     int64_t rcvdata = 0;
     char text[256];
