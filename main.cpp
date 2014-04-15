@@ -343,7 +343,7 @@ void data_loop(raw_hid *dev, int tcp, char *host, int port)
     char text[256];
 
     while (dev->handle!=NULL) {
-        num = rawhidrecv(dev, ya_usbir_rxbuf, sizeof(ya_usbir_rxbuf), 25);
+        num = rawhidrecv(dev, ya_usbir_rxbuf, sizeof(ya_usbir_rxbuf), 100);
         if (num < 0) {
             logprintf(LOG_ERR,"yaUsbIr: error reading, device went offline");
             break;
