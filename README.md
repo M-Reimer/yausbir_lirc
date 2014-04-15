@@ -10,18 +10,18 @@ As I prefer to use an unpatched LIRC, and wanted to learn something about the ba
 Setup
 -----
 
-  make
-  make install
+    make
+    make install
 
 Now get sure that your LIRC daemon gets started with the "UDP" driver
 
-  lircd -H udp
+    lircd -H udp
 
 Finally start the yausbir_lirc daemon
 
-  yausbir_lirc
+    yausbir_lirc
 
 If your distribution uses systemd, then "make install" installs a service file for you. In this case you may just do the following:
 
-  systemctl enable yausbir_lirc
-  systemctl start yausbir_lirc
+    systemctl enable yausbir_lirc
+    systemctl start yausbir_lirc
