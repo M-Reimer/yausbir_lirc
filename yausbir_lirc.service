@@ -1,0 +1,9 @@
+[Unit]
+Description=Small UDP LIRC daemon for yausbir
+
+[Service]
+Type=forking
+ExecStart=/usr/sbin/yausbir_lirc
+
+[Install]
+WantedBy=multi-user.target
