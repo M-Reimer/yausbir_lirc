@@ -11,7 +11,7 @@ LIBS = $(shell pkg-config --libs libusb-1.0)
 all: yausbir_lirc
 
 yausbir_lirc: main.cpp
-	$(CXX) $(CXXFLAGS) $(LIBS) -o $@ $<
+	$(CXX) $(CXXFLAGS) $< $(LIBS) -o $@
 
 install: all
 	install -D -m 755 yausbir_lirc $(DESTDIR)$(BINDIR)/yausbir_lirc
